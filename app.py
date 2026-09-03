@@ -1,84 +1,103 @@
-import streamlit as st
 import asyncio
 import os
-import re
+import shutil
 from pypdf import PdfReader
 import edge_tts
+from tqdm.asyncio import tqdm
 
-# 🌟 Page Configuration (Mobile Friendly Look)
-st.set_page_config(page_title="JARVIS Audiobook Generator", page_icon="🎧", layout="centered")
+# ==========================================
+# 🌟 SETTINGS
+# ==========================================
+VOICE = "en-US-AndrewNeural"   # Real human jaisi natural voice
+PDF_FILE = "book.pdf"         # PDF file ka naam
+OUTPUT_AUDIO = "audiobook.mp3"# Final Audio file ka naam
+CHUNK_SIZE = 5                # Har chunk me 5 pages honge
+CONCURRENT_WORKERS = 5        # Ek saath 5 chunks parallel process honge (Turbo Speed!)
 
-st.title("🎧 JARVIS Audiobook Generator")
-st.markdown("Apni manpasand **PDF Book** upload kijiye aur 100% Free High-Quality **Audiobook** paaiye!")
-
-# 🎙️ Voice Selection Dropdown
-voice_choice = st.selectbox(
-    "🎙️ Select Voice (Aawaz choose karein):",
-    [
-        "Andrew (Male - Natural Storyteller)",
-        "Aria (Female - Natural Voice)",
-        "Guy (Male - Deep Voice)",
-        "Jenny (Female - Clear Voice)"
-    ]
-)
-
-voice_map = {
-    "Andrew (Male - Natural Storyteller)": "en-US-AndrewNeural",
-    "Aria (Female - Natural Voice)": "en-US-AriaNeural",
-    "Guy (Male - Deep Voice)": "en-US-GuyNeural",
-    "Jenny (Female - Clear Voice)": "en-US-JennyNeural"
-}
-selected_voice = voice_map[voice_choice]
-
-# 📁 File Uploader
-uploaded_file = st.file_uploader("📁 PDF Book Upload Karein", type=["pdf"])
-
-async def generate_tts(text, voice, out_file):
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(out_file)
-
-if uploaded_file is not None:
-    if st.button("🚀 Generate Audiobook", type="primary", use_container_width=True):
-        progress_bar = st.progress(0, text="📖 PDF book scan ho rahi hai...")
+def extract_chunks_from_pdf(pdf_path, chunk_size):
+    print(f"📖 Reading '{pdf_path}'...")
+    reader = PdfReader(pdf_path)
+    total_pages = len(reader.pages)
+    print(f"📄 Total Pages Found: {total_pages}")
+    
+    chunks = []
+    current_text = ""
+    current_idx = 1
+    
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text()
+        if text:
+            current_text += text + "\n"
         
-        try:
-            reader = PdfReader(uploaded_file)
-            total_pages = len(reader.pages)
+        # Har chunk_size par ya aakhri page par chunk save karna
+        if (i + 1) % chunk_size == 0 or (i + 1) == total_pages:
+            if current_text.strip():
+                chunks.append((current_idx, current_text.strip()))
+                current_idx += 1
+            current_text = ""
             
-            full_text = ""
-            for i, page in enumerate(reader.pages):
-                text = page.extract_text()
-                if text:
-                    cleaned = re.sub(r'\s+', ' ', text).strip()
-                    if cleaned:
-                        full_text += cleaned + "\n"
-                
-                pct = int(((i + 1) / total_pages) * 40)
-                progress_bar.progress(pct, text=f"📄 Page {i+1}/{total_pages} read kiya...")
+    return chunks, total_pages
 
-            if not full_text.strip():
-                st.error("❌ Is PDF me se text nahi mil paya! Kripya text-based PDF use karein.")
-            else:
-                progress_bar.progress(50, text="🎙️ JARVIS Voice Engine audio bana raha hai (Please wait)...")
-                
-                output_filename = "final_audiobook.mp3"
-                asyncio.run(generate_tts(full_text, selected_voice, output_filename))
-                
-                progress_bar.progress(100, text="🎉 Audiobook successfully ban gayi!")
-                st.success(f"✅ Total {total_pages} Pages ki Audiobook taiyar hai!")
-                
-                # 🎵 Audio Player & Download Button
-                with open(output_filename, "rb") as f:
-                    audio_bytes = f.read()
-                    st.audio(audio_bytes, format="audio/mp3")
-                    
-                    clean_name = uploaded_file.name.rsplit('.', 1)[0]
-                    st.download_button(
-                        label="⬇️ Download MP3 Audiobook",
-                        data=audio_bytes,
-                        file_name=f"{clean_name}_Audiobook.mp3",
-                        mime="audio/mp3",
-                        use_container_width=True
-                    )
+async def process_chunk(chunk_idx, text, temp_folder, semaphore, pbar):
+    temp_file = os.path.join(temp_folder, f"part_{chunk_idx:04d}.mp3")
+    async with semaphore:
+        try:
+            communicate = edge_tts.Communicate(text, VOICE)
+            await communicate.save(temp_file)
         except Exception as e:
-            st.error(f"⚠️ Error aaya: {e}")
+            print(f"\n⚠️ Part {chunk_idx} me error aaya: {e}")
+        finally:
+            pbar.update(1)
+    return temp_file
+
+async def main():
+    if not os.path.exists(PDF_FILE):
+        print(f"❌ Error: '{PDF_FILE}' file nahi mili! Folder me 'book.pdf' rakhein.")
+        return
+
+    # Purani temporary files saaf karna
+    temp_dir = "temp_audio_parts"
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir, exist_ok=True)
+
+    # Chunks extract karna
+    chunks, total_pages = extract_chunks_from_pdf(PDF_FILE, CHUNK_SIZE)
+    total_chunks = len(chunks)
+    
+    if total_chunks == 0:
+        print("❌ Error: PDF me se text nahi nikal paya!")
+        return
+
+    print(f"⚡ Book ko {total_chunks} parts me divide kiya gaya hai.")
+    print(f"🚀 JARVIS Turbo Engine: Ek saath {CONCURRENT_WORKERS} parts download ho rahe hain...\n")
+
+    semaphore = asyncio.Semaphore(CONCURRENT_WORKERS)
+    
+    # 📊 Live Progress Bar
+    pbar = tqdm(total=total_chunks, desc="🎙️ Converting Audiobook", unit="part")
+
+    tasks = [
+        process_chunk(idx, text, temp_dir, semaphore, pbar)
+        for idx, text in chunks
+    ]
+    
+    temp_files = await asyncio.gather(*tasks)
+    pbar.close()
+
+    print("\n🔄 Sabhi parts ko ek single MP3 file me combine kiya ja raha hai...")
+    temp_files.sort()
+    
+    with open(OUTPUT_AUDIO, "wb") as outfile:
+        for tf in temp_files:
+            if os.path.exists(tf):
+                with open(tf, "rb") as infile:
+                    outfile.write(infile.read())
+
+    # Temporary folder delete karna
+    shutil.rmtree(temp_dir)
+    
+    print(f"\n🎉 BOOM! Mubarak ho Young Boss! Turbo Audiobook ready: '{OUTPUT_AUDIO}' 🎧🔥")
+
+if __name__ == "__main__":
+    asyncio.run(main())
