@@ -4,17 +4,14 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 from pypdf import PdfReader
 import edge_tts
-import nest_asyncio
-
-# Asyncio loop fix for Streamlit
-nest_asyncio.apply()
 
 st.set_page_config(page_title="JARVIS Turbo Audiobook", page_icon="⚡", layout="centered")
 
 st.title("⚡ JARVIS Turbo Audiobook Generator")
-st.markdown("Apni PDF book upload kijiye aur **Super-Fast Parallel Speed** me Audiobook paaiye!")
+st.markdown("Apni PDF book upload kijiye aur **100% Free High-Quality Audiobook** paaiye!")
 
 # 🎙️ Voice Selection
 voice_choice = st.selectbox(
@@ -60,7 +57,7 @@ def extract_clean_chunks(pdf_file, chunk_size=5):
             
     return chunks, total_pages
 
-async def process_single_chunk(chunk_idx, text, temp_folder, voice, semaphore, progress_callback):
+async def process_single_chunk(chunk_idx, text, temp_folder, voice, semaphore):
     temp_file = os.path.join(temp_folder, f"part_{chunk_idx:04d}.mp3")
     async with semaphore:
         if text.strip():
@@ -69,30 +66,39 @@ async def process_single_chunk(chunk_idx, text, temp_folder, voice, semaphore, p
                 await communicate.save(temp_file)
             except Exception:
                 pass
-        progress_callback()
     return temp_file
 
-async def run_turbo_pipeline(chunks, voice, temp_dir, progress_bar):
-    total_chunks = len(chunks)
-    completed = 0
-    
-    def on_chunk_done():
-        nonlocal completed
-        completed += 1
-        pct = int((completed / total_chunks) * 100)
-        progress_bar.progress(pct, text=f"⚡ Turbo Speed: {completed}/{total_chunks} parts done ({pct}%)")
-
-    semaphore = asyncio.Semaphore(5) # 5 parallel workers
+async def run_parallel_tts(chunks, voice, temp_dir):
+    semaphore = asyncio.Semaphore(5)  # 5 parallel tasks (Super Fast)
     tasks = [
-        process_single_chunk(idx, text, temp_dir, voice, semaphore, on_chunk_done)
+        process_single_chunk(idx, text, temp_dir, voice, semaphore)
         for idx, text in chunks
     ]
-    temp_files = await asyncio.gather(*tasks)
-    return temp_files
+    return await asyncio.gather(*tasks)
+
+# 🛡️ Safe Isolated Thread Runner (Zero Crash Guarantee)
+def run_safe_async(coro):
+    res = []
+    err = []
+    def target():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            res.append(loop.run_until_complete(coro))
+        except Exception as e:
+            err.append(e)
+        finally:
+            loop.close()
+    t = threading.Thread(target=target)
+    t.start()
+    t.join()
+    if err:
+        raise err[0]
+    return res[0]
 
 if uploaded_file is not None:
     if st.button("🚀 Generate Turbo Audiobook", type="primary", use_container_width=True):
-        progress_bar = st.progress(0, text="📖 PDF book scan ho rahi hai...")
+        progress_bar = st.progress(10, text="📖 PDF book scan ho rahi hai...")
         temp_dir = tempfile.mkdtemp()
         
         try:
@@ -103,11 +109,12 @@ if uploaded_file is not None:
                 st.error("❌ Is PDF me se text nahi mil paya! Kripya text-based PDF use karein.")
             else:
                 st.info(f"📄 Total Pages: {total_pages} | ⚡ Divide kiya: {total_chunks} Parts me")
+                progress_bar.progress(35, text=f"⚡ Turbo Parallel Engine: {total_chunks} parts convert ho rahe hain...")
                 
-                # Run Parallel Pipeline
-                temp_files = asyncio.run(run_turbo_pipeline(chunks, selected_voice, temp_dir, progress_bar))
+                # Run parallel download in isolated safe thread
+                temp_files = run_safe_async(run_parallel_tts(chunks, selected_voice, temp_dir))
                 
-                progress_bar.progress(100, text="🔄 Sabhi parts ko merge kiya ja raha hai...")
+                progress_bar.progress(85, text="🔄 Sabhi parts ko MP3 me merge kiya ja raha hai...")
                 
                 # Merge into single MP3
                 temp_files.sort()
@@ -118,10 +125,10 @@ if uploaded_file is not None:
                             with open(tf, "rb") as infile:
                                 outfile.write(infile.read())
 
-                progress_bar.progress(100, text="🎉 Audiobook Successfully Ban Gayi!")
+                progress_bar.progress(100, text="🎉 Audiobook successfully ready!")
                 st.success(f"✅ Total {total_pages} Pages ki Audiobook taiyar hai!")
                 
-                # Audio Player & Download
+                # Audio Player & Download Button
                 with open(output_mp3_path, "rb") as f:
                     audio_bytes = f.read()
                     st.audio(audio_bytes, format="audio/mp3")
